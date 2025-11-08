@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multiplayer Shooter Game</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      font-family: 'Arial', sans-serif;
+      color: white;
+    }
+
+    #gameContainer {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+    }
+
+    #scoreboard {
+      background: rgba(0, 0, 0, 0.7);
+      padding: 15px 30px;
+      border-radius: 10px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+      min-width: 300px;
+    }
+
+    #scoreboard h2 {
+      margin: 0 0 10px 0;
+      text-align: center;
+      font-size: 24px;
+    }
+
+    .score-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .score-item:last-child {
+      border-bottom: none;
+    }
+
+    #controls {
+      background: rgba(0, 0, 0, 0.7);
+      padding: 15px 30px;
+      border-radius: 10px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+      text-align: center;
+    }
+
+    #controls h3 {
+      margin: 0 0 10px 0;
+    }
+
+    #controls p {
+      margin: 5px 0;
+      font-size: 14px;
+    }
+
+    canvas {
+      border: 3px solid rgba(255, 255, 255, 0.5);
+      border-radius: 10px;
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+    }
+
+    #nicknameModal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.8);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+    }
+
+    #nicknameModal.hidden {
+      display: none;
+    }
+
+    .modal-content {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 40px;
+      border-radius: 15px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      text-align: center;
+      max-width: 400px;
+    }
+
+    .modal-content h2 {
+      margin: 0 0 20px 0;
+      font-size: 32px;
+      text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+    }
+
+    .modal-content input {
+      width: 100%;
+      padding: 15px;
+      font-size: 18px;
+      border: none;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      box-sizing: border-box;
+      text-align: center;
+    }
+
+    .modal-content button {
+      background: #27AE60;
+      color: white;
+      border: none;
+      padding: 15px 40px;
+      font-size: 18px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: all 0.3s;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+
+    .modal-content button:hover {
+      background: #229954;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 8px rgba(0, 0, 0, 0.4);
+    }
+
+    .modal-content button:active {
+      transform: translateY(0);
+    }
+
+    #status {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 10px 20px;
+      border-radius: 5px;
+      font-size: 14px;
+    }
+
+    .connected {
+      color: #27AE60;
+    }
+
+    .disconnected {
+      color: #E74C3C;
+    }
+  </style>
+</head>
+<body>
+  <!-- Nickname Modal -->
+  <div id="nicknameModal">
+    <div class="modal-content">
+      <h2>🎮 Join the Battle!</h2>
+      <p>Enter your nickname to start playing</p>
+      <input type="text" id="nicknameInput" placeholder="Enter your nickname" maxlength="20" autofocus>
+      <button onclick="joinGame()">START GAME</button>
+    </div>
+  </div>
+
+  <div id="status">
+    <span class="disconnected">● Connecting...</span>
+  </div>
+
+  <div id="gameContainer">
+    <div id="scoreboard">
+      <h2>🏆 Scoreboard</h2>
+      <div id="scoreList"></div>
+    </div>
+
+    <div id="sketch-holder"></div>
+
+    <div id="controls">
+      <h3>Controls</h3>
+      <p><strong>WASD</strong> or <strong>Arrow Keys</strong> - Move</p>
+      <p><strong>Mouse</strong> - Aim</p>
+      <p><strong>Left Click</strong> or <strong>Space</strong> - Shoot</p>
+    </div>
+  </div>
+
+  <!-- Socket.IO client library -->
+  <script src="/socket.io/socket.io.js"></script>
+  
+  <!-- p5.js library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.min.js"></script>
+  
+  <!-- p5.sound library for sound effects -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/addons/p5.sound.min.js"></script>
+  
+  <!-- Game configuration -->
+  <script src="gameConfig.js"></script>
+  
+  <!-- Game client -->
+  <script src="game.js"></script>
+</body>
+</html>
