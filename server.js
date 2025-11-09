@@ -478,8 +478,8 @@ io.on('connection', (socket) => {
 // Start server
 const PORT = process.env.PORT || 3000;
 
-// Export for Vercel
-module.exports = http;
+// Export for Vercel (exports the Express app)
+module.exports = app;
 
 // Only listen locally if not in serverless environment
 if (!process.env.VERCEL && require.main === module) {
