@@ -483,13 +483,15 @@ io.on('connection', (socket) => {
 // Start server
 const PORT = process.env.PORT || 3000;
 
-// Export for Vercel (exports the Express app)
-module.exports = app;
-
-// Only listen locally if not in serverless environment
-if (!process.env.VERCEL && require.main === module) {
+// For Vercel serverless, we need to export the http server with Socket.IO
+// Vercel needs the server to handle requests
+if (process.env.VERCEL) {
+  module.exports = http;
+} else {
+  // Local development
   http.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log('Open the URL in multiple browser windows to play multiplayer!');
   });
+  module.exports = http;
 }
