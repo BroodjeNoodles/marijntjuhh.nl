@@ -11,7 +11,12 @@ const path = require('path');
 const GameConfig = require('./public/gameConfig');
 
 // Serve static files from public directory
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Explicit root route handler
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // Game state
 const gameState = {
