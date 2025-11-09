@@ -477,7 +477,14 @@ io.on('connection', (socket) => {
 
 // Start server
 const PORT = process.env.PORT || 3000;
-http.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log('Open the URL in multiple browser windows to play multiplayer!');
-});
+
+// Export for Vercel
+module.exports = http;
+
+// Only listen locally if not on Vercel
+if (process.env.NODE_ENV !== 'production') {
+  http.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log('Open the URL in multiple browser windows to play multiplayer!');
+  });
+}
