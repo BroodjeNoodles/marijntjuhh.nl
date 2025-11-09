@@ -481,8 +481,8 @@ const PORT = process.env.PORT || 3000;
 // Export for Vercel
 module.exports = http;
 
-// Only listen locally if not on Vercel
-if (process.env.NODE_ENV !== 'production') {
+// Only listen locally if not in serverless environment
+if (!process.env.VERCEL && require.main === module) {
   http.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log('Open the URL in multiple browser windows to play multiplayer!');
