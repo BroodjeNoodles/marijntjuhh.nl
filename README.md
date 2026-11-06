@@ -16,6 +16,8 @@ A real-time browser-based multiplayer shooting game built with **Node.js**, **So
 - **Projectile physics** with collision detection
 - **Power-ups** that restore health
 - **Kill tracking scoreboard**
+- **Three selectable maps** (Quarry, Outpost, and Ruins)
+- **Wall-safe spawning** for players and the bot
 
 ### Technical Features
 - **Server-side game state** management
@@ -80,6 +82,7 @@ npm run dev
 - The bot has **150 health** and is more challenging
 - Power-ups spawn every **10 seconds** (max 3 on map)
 - Projectiles last **2 seconds** before disappearing
+- Choose a map before joining. A round uses one map until all players leave.
 
 ## 📁 Project Structure
 
@@ -174,7 +177,7 @@ Ideas for extending the game:
 ## 📝 Technical Details
 
 ### Server (Node.js + Socket.IO)
-- Runs at **60 ticks per second**
+- Runs simulation at **60 ticks per second** and sends network snapshots at **20 per second**
 - Handles collision detection server-side
 - Manages game state for all clients
 - Implements bot AI logic

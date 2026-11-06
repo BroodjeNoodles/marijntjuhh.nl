@@ -8,29 +8,34 @@
     body {
       margin: 0;
       padding: 0;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #222f3e;
       font-family: 'Arial', sans-serif;
       color: white;
     }
 
     #gameContainer {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 20px;
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
     }
 
     #scoreboard {
-      background: rgba(0, 0, 0, 0.7);
-      padding: 15px 30px;
-      border-radius: 10px;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-      min-width: 300px;
+      display: block;
+      position: fixed;
+      top: 16px;
+        left: 16px;
+      z-index: 20;
+      min-width: 220px;
+      max-width: 280px;
+      padding: 10px 16px;
+      background: rgba(0, 0, 0, 0.62);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 8px;
+      pointer-events: none;
     }
 
     #scoreboard h2 {
@@ -51,11 +56,7 @@
     }
 
     #controls {
-      background: rgba(0, 0, 0, 0.7);
-      padding: 15px 30px;
-      border-radius: 10px;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-      text-align: center;
+      display: none;
     }
 
     #controls h3 {
@@ -68,9 +69,12 @@
     }
 
     canvas {
-      border: 3px solid rgba(255, 255, 255, 0.5);
-      border-radius: 10px;
-      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+      display: block;
+      width: 100vw !important;
+      height: 100vh !important;
+      border: none;
+      border-radius: 0;
+      box-shadow: none;
     }
 
     #nicknameModal {
@@ -116,6 +120,17 @@
       text-align: center;
     }
 
+    .modal-content select {
+      width: 100%;
+      padding: 15px;
+      font-size: 18px;
+      border: none;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      box-sizing: border-box;
+      text-align: center;
+    }
+
     .modal-content button {
       background: #27AE60;
       color: white;
@@ -140,13 +155,7 @@
     }
 
     #status {
-      position: absolute;
-      top: 20px;
-      left: 20px;
-      background: rgba(0, 0, 0, 0.7);
-      padding: 10px 20px;
-      border-radius: 5px;
-      font-size: 14px;
+      display: none;
     }
 
     .connected {
@@ -165,6 +174,8 @@
       <h2>🎮 Join the Battle!</h2>
       <p>Enter your nickname to start playing</p>
       <input type="text" id="nicknameInput" placeholder="Enter your nickname" maxlength="20" autofocus>
+      <select id="weaponSelect" aria-label="Choose your weapon"></select>
+      <select id="modeSelect" aria-label="Vote for a game mode"></select>
       <button onclick="joinGame()">START GAME</button>
     </div>
   </div>

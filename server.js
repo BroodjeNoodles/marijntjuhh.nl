@@ -21,26 +21,41 @@ app.get('/', (req, res) => {
 // Game state
 const gameState = {
   players: {}, // Connected players
-  bot: null,   // AI bot
+  bots: [],    // AI bots
   projectiles: [], // Active projectiles
   powerups: [],    // Active power-ups
-  obstacles: []    // Static obstacles
+  obstacles: [],   // Destructible walls
+  explosions: [],
+  round: {
+    number: 1,
+    mode: 'freeForAll',
+    weapon: 'dualPistols',
+    startedAt: Date.now(),
+    kothTime: 0
+  }
 };
 
 let nextProjectileId = 0;
 let nextPowerupId = 0;
+let activeMapId = 'quarry';
+let simulationTick = 0;
+const mapVotes = {};
+const modeVotes = {};
+const weaponVotes = {};
 
 /**
  * Generate random obstacles on the map
  */
-function generateObstacles() {
+function generateObstacles(mapId = activeMapId) {
   gameState.obstacles = [];
+  const map = GameConfig.MAPS[mapId] || GameConfig.MAPS.quarry;
   
-  for (let i = 0; i < GameConfig.OBSTACLE_COUNT; i++) {
-    const width = GameConfig.OBSTACLE_MIN_SIZE + 
-                  Math.random() * (GameConfig.OBSTACLE_MAX_SIZE - GameConfig.OBSTACLE_MIN_SIZE);
-    const height = GameConfig.OBSTACLE_MIN_SIZE + 
-                   Math.random() * (GameConfig.OBSTACLE_MAX_SIZE - GameConfig.OBSTACLE_MIN_SIZE);
+  const obstacleCount = Math.max(4, Math.round(map.obstacleCount * (0.65 + Math.random() * 0.7)));
+  for (let i = 0; i < obstacleCount; i++) {
+    const width = map.minObstacleSize +
+                  Math.random() * (map.maxObstacleSize - map.minObstacleSize);
+    const height = map.minObstacleSize +
+                   Math.random() * (map.maxObstacleSize - map.minObstacleSize);
     
     let x, y;
     let attempts = 0;
@@ -69,9 +84,52 @@ function generateObstacles() {
       y: y,
       width: width,
       height: height,
+      health: 100,
+      destructible: true,
       type: Math.random() > 0.5 ? 'rect' : 'rect' // Can add more types later
     });
   }
+}
+
+function isValidSpawn(x, y, radius, ignoreId = null) {
+  if (checkObstacleCollision(x, y, radius)) return false;
+
+  const entities = Object.values(gameState.players).filter(player => player.id !== ignoreId && player.alive);
+  gameState.bots.filter(bot => bot.alive && bot.id !== ignoreId).forEach(bot => entities.push(bot));
+  return entities.every(entity => {
+    const dx = entity.x - x;
+    const dy = entity.y - y;
+    const entityRadius = entity.isBot ? (entity.size || GameConfig.BOT_SIZE) / 2 : GameConfig.PLAYER_SIZE / 2;
+    return dx * dx + dy * dy >= (radius + entityRadius) ** 2;
+  });
+}
+
+function findSafeSpawn(radius, ignoreId = null) {
+  const min = radius;
+  const maxX = GameConfig.MAP_WIDTH - radius;
+  const maxY = GameConfig.MAP_HEIGHT - radius;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const x = min + Math.random() * (maxX - min);
+    const y = min + Math.random() * (maxY - min);
+    if (isValidSpawn(x, y, radius, ignoreId)) return { x, y };
+  }
+
+  for (let y = min; y <= maxY; y += 40) {
+    for (let x = min; x <= maxX; x += 40) {
+      if (isValidSpawn(x, y, radius, ignoreId)) return { x, y };
+    }
+  }
+
+  // When every open spot is occupied, keep the spawn clear of walls and let
+  // the normal separation check resolve on the next respawn.
+  for (let y = min; y <= maxY; y += 40) {
+    for (let x = min; x <= maxX; x += 40) {
+      if (!checkObstacleCollision(x, y, radius)) return { x, y };
+    }
+  }
+
+  return { x: min, y: min };
 }
 
 /**
@@ -94,17 +152,41 @@ function checkObstacleCollision(x, y, radius) {
   return null;
 }
 
-/**
- * Initialize the AI bot
- */
-function initializeBot() {
-  gameState.bot = {
-    id: 'bot',
-    x: GameConfig.MAP_WIDTH / 2,
-    y: GameConfig.MAP_HEIGHT / 2,
+function getRandomBotProfile() {
+  const profiles = GameConfig.BOT_PROFILES || [];
+  return profiles[Math.floor(Math.random() * profiles.length)] || {
+    id: 'default',
+    name: 'BOT',
+    image: null,
+    buff: {}
+  };
+}
+
+function getRandomMapId() {
+  const mapIds = Object.keys(GameConfig.MAPS);
+  return mapIds[Math.floor(Math.random() * mapIds.length)] || 'quarry';
+}
+
+function createBot(profile, index) {
+  const spawn = findSafeSpawn(GameConfig.BOT_SIZE / 2);
+  const buff = profile.buff || {};
+  return {
+    id: `bot-${profile.id}-${index}`,
+    isBot: true,
+    profileId: profile.id,
+    name: profile.name,
+    image: profile.image,
+    imageFallback: profile.imageFallback || null,
+    x: spawn.x,
+    y: spawn.y,
     angle: 0,
-    health: GameConfig.BOT_MAX_HEALTH,
-    maxHealth: GameConfig.BOT_MAX_HEALTH,
+    speed: Math.min(GameConfig.BOT_SPEED * (buff.speedMultiplier || 1), GameConfig.BOT_MAX_SPEED),
+    projectileSpeed: GameConfig.PROJECTILE_SPEED * (buff.projectileSpeedMultiplier || 1),
+    projectileDamage: GameConfig.PROJECTILE_DAMAGE * (buff.damageMultiplier || 1),
+    fireCooldown: GameConfig.BOT_FIRE_COOLDOWN / (buff.fireRateMultiplier || 1),
+    detectionRange: GameConfig.BOT_DETECTION_RANGE * (buff.detectionRangeMultiplier || 1),
+    health: GameConfig.BOT_MAX_HEALTH * (buff.healthMultiplier || 1),
+    maxHealth: GameConfig.BOT_MAX_HEALTH * (buff.healthMultiplier || 1),
     lastFired: 0,
     alive: true,
     targetX: Math.random() * GameConfig.MAP_WIDTH,
@@ -113,46 +195,151 @@ function initializeBot() {
   };
 }
 
+function createBoss() {
+  const boss = GameConfig.BOSS;
+  const spawn = findSafeSpawn(boss.size / 2, 'boss');
+  gameState.bots.push({
+    id: 'boss-round-' + gameState.round.number,
+    isBot: true,
+    isBoss: true,
+    profileId: 'boss',
+    name: boss.name,
+    image: boss.image,
+    x: spawn.x,
+    y: spawn.y,
+    angle: 0,
+    size: boss.size,
+    speed: boss.speed,
+    projectileSpeed: GameConfig.PROJECTILE_SPEED,
+    projectileDamage: boss.damage,
+    fireCooldown: boss.fireCooldown,
+    detectionRange: boss.detectionRange,
+    health: boss.health,
+    maxHealth: boss.health,
+    lastFired: 0,
+    alive: true,
+    targetX: Math.random() * GameConfig.MAP_WIDTH,
+    targetY: Math.random() * GameConfig.MAP_HEIGHT,
+    lastWander: Date.now()
+  });
+}
+
 /**
- * Bot AI logic - moves and shoots at nearest player
+ * Initialize a randomized group of AI bots.
  */
-function updateBot() {
-  if (!gameState.bot || !gameState.bot.alive) return;
+function initializeBots() {
+  const profiles = [...(GameConfig.BOT_PROFILES || [])].sort(() => Math.random() - 0.5);
+  const minimum = Math.max(1, Math.min(GameConfig.BOT_MIN_COUNT, profiles.length));
+  const maximum = Math.max(minimum, Math.min(GameConfig.BOT_MAX_COUNT, profiles.length));
+  const count = minimum + Math.floor(Math.random() * (maximum - minimum + 1));
 
-  const bot = gameState.bot;
-  const now = Date.now();
+  gameState.bots = [];
+  for (let index = 0; index < count; index++) {
+    gameState.bots.push(createBot(profiles[index], index));
+  }
+}
 
-  // Find nearest player
-  let nearestPlayer = null;
+function winningVote(votes, fallback) {
+  const entries = Object.entries(votes);
+  if (!entries.length) return fallback;
+  entries.sort((left, right) => right[1] - left[1]);
+  return entries[0][0];
+}
+
+function startRound() {
+  activeMapId = getRandomMapId();
+  gameState.round.mode = winningVote(modeVotes, gameState.round.mode);
+  gameState.round.weapon = winningVote(weaponVotes, gameState.round.weapon || 'dualPistols');
+  gameState.round.number++;
+  gameState.round.startedAt = Date.now();
+  gameState.round.kothTime = 0;
+  gameState.round.koth = {
+    x: Math.random() * GameConfig.MAP_WIDTH,
+    y: Math.random() * GameConfig.MAP_HEIGHT,
+    radius: 180
+  };
+  gameState.projectiles = [];
+  gameState.powerups = [];
+  gameState.explosions = [];
+  generateObstacles(activeMapId);
+  initializeBots();
+  if (gameState.round.mode === 'bossFight') createBoss();
+  Object.values(gameState.players).forEach((player, index) => {
+    player.team = gameState.round.mode === 'teamDeathmatch' ? (index % 2 === 0 ? 'red' : 'blue') : null;
+    const spawn = findSafeSpawn(GameConfig.PLAYER_SIZE / 2, player.id);
+    player.x = spawn.x;
+    player.y = spawn.y;
+    player.health = player.maxHealth;
+    player.weapon = gameState.round.weapon;
+    player.alive = true;
+  });
+  Object.keys(modeVotes).forEach(key => delete modeVotes[key]);
+  Object.keys(weaponVotes).forEach(key => delete weaponVotes[key]);
+  io.emit('roundStarted', { round: gameState.round, mapId: activeMapId });
+}
+
+function findNearestBotTarget(bot) {
+  const targets = [
+    ...Object.values(gameState.players).filter(player => player.alive),
+    ...gameState.bots.filter(candidate => candidate.alive && candidate.id !== bot.id)
+  ];
+  let nearestTarget = null;
   let nearestDistance = Infinity;
 
-  Object.values(gameState.players).forEach(player => {
-    if (!player.alive) return;
-    const dx = player.x - bot.x;
-    const dy = player.y - bot.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-
+  for (const target of targets) {
+    const distance = Math.hypot(target.x - bot.x, target.y - bot.y);
     if (distance < nearestDistance) {
       nearestDistance = distance;
-      nearestPlayer = player;
+      nearestTarget = target;
     }
-  });
+  }
 
-  // If player is in range, move towards and shoot at them
-  if (nearestPlayer && nearestDistance < GameConfig.BOT_DETECTION_RANGE) {
-    const dx = nearestPlayer.x - bot.x;
-    const dy = nearestPlayer.y - bot.y;
+  return { target: nearestTarget, distance: nearestDistance };
+}
+
+function separateBot(bot) {
+  const nearbyEntities = [
+    ...Object.values(gameState.players).filter(player => player.alive),
+    ...gameState.bots.filter(candidate => candidate.alive && candidate.id !== bot.id)
+  ];
+  const separationDistance = GameConfig.BOT_SEPARATION_DISTANCE;
+
+  for (const entity of nearbyEntities) {
+    const dx = bot.x - entity.x;
+    const dy = bot.y - entity.y;
+    const distance = Math.hypot(dx, dy);
+    if (!distance || distance >= separationDistance) continue;
+
+    const push = (separationDistance - distance) / distance;
+    bot.x += dx * push * 0.35;
+    bot.y += dy * push * 0.35;
+  }
+}
+
+/**
+ * Bot AI logic - fights the nearest living player or bot.
+ */
+function updateBot(bot) {
+  if (!bot || !bot.alive) return;
+  const now = Date.now();
+
+  const { target: nearestTarget, distance: nearestDistance } = findNearestBotTarget(bot);
+
+  // If an opponent is in range, move towards and shoot at them.
+  if (nearestTarget && nearestDistance < bot.detectionRange) {
+    const dx = nearestTarget.x - bot.x;
+    const dy = nearestTarget.y - bot.y;
     const angle = Math.atan2(dy, dx);
 
     // Move towards player
-    bot.x += Math.cos(angle) * GameConfig.BOT_SPEED;
-    bot.y += Math.sin(angle) * GameConfig.BOT_SPEED;
+    bot.x += Math.cos(angle) * bot.speed;
+    bot.y += Math.sin(angle) * bot.speed;
     bot.angle = angle;
     
     // Check obstacle collision and revert if needed
-    if (checkObstacleCollision(bot.x, bot.y, GameConfig.BOT_SIZE / 2)) {
-      bot.x -= Math.cos(angle) * GameConfig.BOT_SPEED;
-      bot.y -= Math.sin(angle) * GameConfig.BOT_SPEED;
+    if (checkObstacleCollision(bot.x, bot.y, (bot.size || GameConfig.BOT_SIZE) / 2)) {
+      bot.x -= Math.cos(angle) * bot.speed;
+      bot.y -= Math.sin(angle) * bot.speed;
       // Pick new random target
       bot.targetX = Math.random() * GameConfig.MAP_WIDTH;
       bot.targetY = Math.random() * GameConfig.MAP_HEIGHT;
@@ -160,8 +347,8 @@ function updateBot() {
     }
 
     // Shoot at player
-    if (now - bot.lastFired > GameConfig.BOT_FIRE_COOLDOWN) {
-      createProjectile(bot.x, bot.y, angle, 'bot');
+    if (now - bot.lastFired > bot.fireCooldown) {
+      createProjectile(bot.x, bot.y, angle, bot.id);
       bot.lastFired = now;
     }
   } else {
@@ -178,14 +365,14 @@ function updateBot() {
 
     if (distance > 5) {
       const angle = Math.atan2(dy, dx);
-      bot.x += Math.cos(angle) * GameConfig.BOT_SPEED;
-      bot.y += Math.sin(angle) * GameConfig.BOT_SPEED;
+      bot.x += Math.cos(angle) * bot.speed;
+      bot.y += Math.sin(angle) * bot.speed;
       bot.angle = angle;
       
       // Check obstacle collision and revert if needed
-      if (checkObstacleCollision(bot.x, bot.y, GameConfig.BOT_SIZE / 2)) {
-        bot.x -= Math.cos(angle) * GameConfig.BOT_SPEED;
-        bot.y -= Math.sin(angle) * GameConfig.BOT_SPEED;
+      if (checkObstacleCollision(bot.x, bot.y, (bot.size || GameConfig.BOT_SIZE) / 2)) {
+        bot.x -= Math.cos(angle) * bot.speed;
+        bot.y -= Math.sin(angle) * bot.speed;
         // Pick new target
         bot.targetX = Math.random() * GameConfig.MAP_WIDTH;
         bot.targetY = Math.random() * GameConfig.MAP_HEIGHT;
@@ -194,24 +381,52 @@ function updateBot() {
     }
   }
 
+  separateBot(bot);
+
   // Keep bot within bounds
-  bot.x = Math.max(GameConfig.BOT_SIZE / 2, Math.min(GameConfig.MAP_WIDTH - GameConfig.BOT_SIZE / 2, bot.x));
-  bot.y = Math.max(GameConfig.BOT_SIZE / 2, Math.min(GameConfig.MAP_HEIGHT - GameConfig.BOT_SIZE / 2, bot.y));
+  const botRadius = (bot.size || GameConfig.BOT_SIZE) / 2;
+  bot.x = Math.max(botRadius, Math.min(GameConfig.MAP_WIDTH - botRadius, bot.x));
+  bot.y = Math.max(botRadius, Math.min(GameConfig.MAP_HEIGHT - botRadius, bot.y));
 }
 
 /**
  * Create a new projectile
  */
 function createProjectile(x, y, angle, ownerId) {
-  gameState.projectiles.push({
+  const botOwner = (ownerId.startsWith('bot-') || ownerId.startsWith('boss-'))
+    ? gameState.bots.find(bot => bot.id === ownerId)
+    : null;
+  const owner = botOwner || gameState.players[ownerId];
+  const weapon = GameConfig.WEAPONS[owner && owner.weapon] || {
+    cooldown: GameConfig.FIRE_COOLDOWN,
+    speed: GameConfig.PROJECTILE_SPEED,
+    damage: GameConfig.PROJECTILE_DAMAGE,
+    lifetime: GameConfig.PROJECTILE_LIFETIME,
+    spread: 0,
+    count: 1,
+    size: GameConfig.PROJECTILE_SIZE
+  };
+  const damageMultiplier = (owner && owner.damageMultiplier || 1) * (owner && owner.doubleDamageUntil > Date.now() ? 2 : 1);
+  const projectileCount = weapon.count || 1;
+  for (let index = 0; index < projectileCount; index++) {
+    const spread = projectileCount === 1 ? 0 : (index - (projectileCount - 1) / 2) * weapon.spread;
+    const projectileAngle = angle + spread;
+    gameState.projectiles.push({
     id: nextProjectileId++,
     x: x,
     y: y,
-    vx: Math.cos(angle) * GameConfig.PROJECTILE_SPEED,
-    vy: Math.sin(angle) * GameConfig.PROJECTILE_SPEED,
+    vx: Math.cos(projectileAngle) * (botOwner ? botOwner.projectileSpeed : weapon.speed),
+    vy: Math.sin(projectileAngle) * (botOwner ? botOwner.projectileSpeed : weapon.speed),
+    damage: (botOwner ? botOwner.projectileDamage : weapon.damage) * damageMultiplier,
+    size: weapon.size || GameConfig.PROJECTILE_SIZE,
+    explosionRadius: weapon.explosionRadius || 0,
+    freeze: weapon.freeze || 0,
+    returning: Boolean(weapon.returning),
     ownerId: ownerId,
-    createdAt: Date.now()
-  });
+    createdAt: Date.now(),
+    lifetime: weapon.lifetime || GameConfig.PROJECTILE_LIFETIME
+    });
+  }
 }
 
 /**
@@ -228,12 +443,16 @@ function updateProjectiles() {
     // Remove if out of bounds or too old
     if (projectile.x < 0 || projectile.x > GameConfig.MAP_WIDTH ||
         projectile.y < 0 || projectile.y > GameConfig.MAP_HEIGHT ||
-        now - projectile.createdAt > GameConfig.PROJECTILE_LIFETIME) {
+        now - projectile.createdAt > projectile.lifetime) {
       return false;
     }
     
     // Remove if hits obstacle
-    if (checkObstacleCollision(projectile.x, projectile.y, GameConfig.PROJECTILE_SIZE / 2)) {
+    const obstacle = checkObstacleCollision(projectile.x, projectile.y, projectile.size / 2);
+    if (obstacle) {
+      if (projectile.explosionRadius) createExplosion(projectile.x, projectile.y, projectile.explosionRadius, projectile.damage, projectile.ownerId);
+      if (obstacle.destructible) obstacle.health -= projectile.damage;
+      if (obstacle.health <= 0) gameState.obstacles = gameState.obstacles.filter(candidate => candidate.id !== obstacle.id);
       return false;
     }
 
@@ -246,59 +465,68 @@ function updateProjectiles() {
     for (let playerId in gameState.players) {
       const player = gameState.players[playerId];
       if (!player.alive || playerId === projectile.ownerId) continue;
+      const shooter = gameState.players[projectile.ownerId];
+      if (gameState.round.mode === 'teamDeathmatch' && shooter && shooter.team && shooter.team === player.team) continue;
 
       const dx = player.x - projectile.x;
       const dy = player.y - projectile.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
 
       if (distance < GameConfig.PLAYER_SIZE / 2) {
-        player.health -= GameConfig.PROJECTILE_DAMAGE;
+        if (!player.shieldUntil || player.shieldUntil <= Date.now()) player.health -= projectile.damage;
+        if (projectile.freeze) player.frozenUntil = Math.max(player.frozenUntil || 0, Date.now() + projectile.freeze);
+        if (projectile.explosionRadius) createExplosion(projectile.x, projectile.y, projectile.explosionRadius, projectile.damage, projectile.ownerId);
         
         if (player.health <= 0) {
           player.health = 0;
           player.alive = false;
           
           // Award kill to shooter
-          if (projectile.ownerId === 'bot') {
+          if (projectile.ownerId.startsWith('bot-') || projectile.ownerId.startsWith('boss-')) {
             // Bot got a kill
           } else if (gameState.players[projectile.ownerId]) {
             gameState.players[projectile.ownerId].kills = (gameState.players[projectile.ownerId].kills || 0) + 1;
           }
           
           // Respawn after delay
-          setTimeout(() => {
-            if (gameState.players[playerId]) {
-              respawnPlayer(gameState.players[playerId]);
-            }
-          }, GameConfig.PLAYER_RESPAWN_TIME);
+          if (gameState.round.mode !== 'lastManStanding') {
+            setTimeout(() => {
+              if (gameState.players[playerId]) respawnPlayer(gameState.players[playerId]);
+            }, GameConfig.PLAYER_RESPAWN_TIME);
+          }
         }
         
         return false; // Remove projectile
       }
     }
 
-    // Check collision with bot
-    if (gameState.bot && gameState.bot.alive && projectile.ownerId !== 'bot') {
-      const dx = gameState.bot.x - projectile.x;
-      const dy = gameState.bot.y - projectile.y;
+    // Check collision with bots
+    const targetBot = gameState.bots.find(bot => bot.alive && projectile.ownerId !== bot.id &&
+      Math.hypot(bot.x - projectile.x, bot.y - projectile.y) < (bot.size || GameConfig.BOT_SIZE) / 2);
+
+    if (targetBot) {
+      const dx = targetBot.x - projectile.x;
+      const dy = targetBot.y - projectile.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
 
-      if (distance < GameConfig.BOT_SIZE / 2) {
-        gameState.bot.health -= GameConfig.PROJECTILE_DAMAGE;
+      if (distance < (targetBot.size || GameConfig.BOT_SIZE) / 2) {
+        targetBot.health -= projectile.damage;
         
-        if (gameState.bot.health <= 0) {
-          gameState.bot.health = 0;
-          gameState.bot.alive = false;
+        if (targetBot.health <= 0) {
+          targetBot.health = 0;
+          targetBot.alive = false;
           
           // Award kill to shooter
           if (gameState.players[projectile.ownerId]) {
             gameState.players[projectile.ownerId].kills = (gameState.players[projectile.ownerId].kills || 0) + 1;
           }
           
-          // Respawn bot after delay
-          setTimeout(() => {
-            respawnBot();
-          }, GameConfig.PLAYER_RESPAWN_TIME);
+          // Respawn this bot after the normal delay.
+          if (!targetBot.isBoss) {
+            setTimeout(() => {
+              respawnBot(targetBot.id);
+            }, GameConfig.PLAYER_RESPAWN_TIME);
+          }
         }
         
         return false; // Remove projectile
@@ -313,21 +541,37 @@ function updateProjectiles() {
  * Respawn a player at a random position
  */
 function respawnPlayer(player) {
-  player.x = Math.random() * (GameConfig.MAP_WIDTH - 100) + 50;
-  player.y = Math.random() * (GameConfig.MAP_HEIGHT - 100) + 50;
-  player.health = GameConfig.PLAYER_MAX_HEALTH;
+  applyRandomPlayerProfile(player);
+  const spawn = findSafeSpawn(GameConfig.PLAYER_SIZE / 2, player.id);
+  player.x = spawn.x;
+  player.y = spawn.y;
+  player.health = player.maxHealth;
   player.alive = true;
 }
 
+function applyRandomPlayerProfile(player) {
+  const profiles = GameConfig.BOT_PROFILES || [];
+  if (!profiles.length) return;
+  const profile = profiles[Math.floor(Math.random() * profiles.length)];
+  const buff = profile.buff || {};
+  player.profileId = profile.id;
+  player.image = profile.image;
+  player.maxHealth = GameConfig.PLAYER_MAX_HEALTH * (buff.healthMultiplier || 1);
+  player.damageMultiplier = buff.damageMultiplier || 1;
+  player.speed = GameConfig.PLAYER_SPEED * (buff.speedMultiplier || 1);
+}
+
 /**
- * Respawn the bot
+ * Respawn one bot
  */
-function respawnBot() {
-  if (gameState.bot) {
-    gameState.bot.x = Math.random() * (GameConfig.MAP_WIDTH - 100) + 50;
-    gameState.bot.y = Math.random() * (GameConfig.MAP_HEIGHT - 100) + 50;
-    gameState.bot.health = GameConfig.BOT_MAX_HEALTH;
-    gameState.bot.alive = true;
+function respawnBot(botId) {
+  const bot = gameState.bots.find(candidate => candidate.id === botId);
+  if (bot) {
+    const spawn = findSafeSpawn((bot.size || GameConfig.BOT_SIZE) / 2, bot.id);
+    bot.x = spawn.x;
+    bot.y = spawn.y;
+    bot.health = bot.maxHealth;
+    bot.alive = true;
   }
 }
 
@@ -335,13 +579,59 @@ function respawnBot() {
  * Spawn a random power-up
  */
 function spawnPowerup() {
-  if (gameState.powerups.length >= GameConfig.POWERUP_MAX_COUNT) return;
+  if (gameState.powerups.length >= GameConfig.POWERUP_SPAWN_LIMIT) return;
 
   gameState.powerups.push({
     id: nextPowerupId++,
     x: Math.random() * (GameConfig.MAP_WIDTH - 100) + 50,
     y: Math.random() * (GameConfig.MAP_HEIGHT - 100) + 50,
-    type: 'health' // Only health power-ups for now
+    type: ['health', 'shield', 'doubleDamage'][Math.floor(Math.random() * 3)]
+  });
+}
+
+function createExplosion(x, y, radius, damage, ownerId = null) {
+  gameState.explosions.push({ id: nextPowerupId++, x, y, radius, createdAt: Date.now() });
+  Object.values(gameState.players).forEach(player => {
+    if (!player.alive || player.id === ownerId) return;
+    if (Math.hypot(player.x - x, player.y - y) <= radius && !player.shieldUntil) player.health -= damage;
+  });
+  gameState.bots.forEach(bot => {
+    if (!bot.alive || bot.id === ownerId) return;
+    if (Math.hypot(bot.x - x, bot.y - y) <= radius) bot.health -= damage;
+  });
+}
+
+function updateGameMode() {
+  const mode = gameState.round.mode;
+  const players = Object.values(gameState.players);
+  if (mode === 'lastManStanding' && players.length > 1 && players.filter(player => player.alive).length <= 1) {
+    startRound();
+    return;
+  }
+  if (mode === 'bossFight' && !gameState.bots.some(bot => bot.isBoss && bot.alive)) {
+    startRound();
+    return;
+  }
+  if (mode === 'kingOfTheHill' && gameState.round.koth) {
+    const inZone = players.some(player => player.alive &&
+      Math.hypot(player.x - gameState.round.koth.x, player.y - gameState.round.koth.y) <= gameState.round.koth.radius);
+    if (inZone) gameState.round.kothTime += 1000 / GameConfig.SERVER_TICK_RATE;
+    if (gameState.round.kothTime >= GameConfig.KOTH_TARGET_TIME) startRound();
+  }
+}
+
+function updateEnvironment() {
+  const now = Date.now();
+  gameState.explosions = gameState.explosions.filter(explosion => now - explosion.createdAt < 500);
+  if (Math.random() < 1 / (GameConfig.EXPLOSION_INTERVAL / (1000 / GameConfig.SERVER_TICK_RATE))) {
+    createExplosion(Math.random() * GameConfig.MAP_WIDTH, Math.random() * GameConfig.MAP_HEIGHT, 70, 20);
+  }
+  Object.values(gameState.players).forEach(player => {
+    if (player.shieldUntil && player.shieldUntil < now) player.shieldUntil = 0;
+    if (player.doubleDamageUntil && player.doubleDamageUntil < now) player.doubleDamageUntil = 0;
+    if (player.frozenUntil && player.frozenUntil < now) player.frozenUntil = 0;
+    const map = GameConfig.MAPS[activeMapId];
+    if (map.lava && !checkObstacleCollision(player.x, player.y, GameConfig.PLAYER_SIZE / 2)) player.health -= GameConfig.LAVA_DAMAGE;
   });
 }
 
@@ -363,6 +653,8 @@ function updatePowerups() {
         if (powerup.type === 'health') {
           player.health = Math.min(player.health + GameConfig.POWERUP_HEALTH_RESTORE, GameConfig.PLAYER_MAX_HEALTH);
         }
+        if (powerup.type === 'shield') player.shieldUntil = Date.now() + GameConfig.POWERUP_DURATION;
+        if (powerup.type === 'doubleDamage') player.doubleDamageUntil = Date.now() + GameConfig.POWERUP_DURATION;
         return false; // Remove power-up
       }
     }
@@ -374,23 +666,40 @@ function updatePowerups() {
  * Main game loop
  */
 function gameLoop() {
-  updateBot();
+  gameState.bots.forEach(updateBot);
   updateProjectiles();
   updatePowerups();
+  updateEnvironment();
+  updateGameMode();
 
-  // Broadcast game state to all clients
-  io.emit('gameState', {
+  if (Object.keys(gameState.players).length && Date.now() - gameState.round.startedAt >= GameConfig.ROUND_DURATION) {
+    startRound();
+  }
+
+  simulationTick++;
+  if (simulationTick % Math.max(1, Math.round(GameConfig.SERVER_TICK_RATE / GameConfig.STATE_BROADCAST_RATE)) !== 0) return;
+
+  // Physics remains responsive at 60 Hz while network snapshots are capped.
+  io.emit('gameState', getPublicGameState());
+}
+
+function getPublicGameState() {
+  return {
+    mapId: activeMapId,
     players: gameState.players,
-    bot: gameState.bot,
+    bots: gameState.bots,
     projectiles: gameState.projectiles,
     powerups: gameState.powerups,
-    obstacles: gameState.obstacles
-  });
+    obstacles: gameState.obstacles,
+    explosions: gameState.explosions
+    ,round: gameState.round
+    ,map: GameConfig.MAPS[activeMapId]
+  };
 }
 
 // Initialize game
 generateObstacles();
-initializeBot();
+initializeBots();
 
 // Start power-up spawner
 setInterval(spawnPowerup, GameConfig.POWERUP_SPAWN_INTERVAL);
@@ -406,19 +715,52 @@ io.on('connection', (socket) => {
   console.log('Player connected:', socket.id);
 
   // Wait for player to send their nickname
-  socket.on('setNickname', (nickname) => {
+  socket.on('setNickname', (data) => {
+    const options = typeof data === 'string' ? { nickname: data } : data;
+    const nickname = options.nickname;
+    const requestedMode = options.mode || gameState.round.mode;
+    const selectedWeapon = GameConfig.WEAPONS[options.weapon] ? options.weapon : 'dualPistols';
+    const selectedProfile = getRandomBotProfile();
+    if (!GameConfig.GAME_MODES[requestedMode]) {
+      socket.emit('joinRejected', 'That game mode is unavailable.');
+      return;
+    }
+    if (Object.keys(gameState.players).length === 0) {
+      activeMapId = getRandomMapId();
+      gameState.round.mode = requestedMode;
+      gameState.round.weapon = selectedWeapon;
+      gameState.round.startedAt = Date.now();
+      generateObstacles(activeMapId);
+      initializeBots();
+      if (requestedMode === 'bossFight') createBoss();
+      if (requestedMode === 'kingOfTheHill') {
+        gameState.round.koth = { x: Math.random() * GameConfig.MAP_WIDTH, y: Math.random() * GameConfig.MAP_HEIGHT, radius: 180 };
+      }
+    }
+    modeVotes[requestedMode] = (modeVotes[requestedMode] || 0) + 1;
+    weaponVotes[selectedWeapon] = (weaponVotes[selectedWeapon] || 0) + 1;
     // Sanitize nickname
     const sanitizedNickname = (nickname || 'Player').substring(0, 20).trim() || 'Player';
     
     // Create new player
+    const spawn = findSafeSpawn(GameConfig.PLAYER_SIZE / 2);
     gameState.players[socket.id] = {
       id: socket.id,
       nickname: sanitizedNickname,
-      x: Math.random() * (GameConfig.MAP_WIDTH - 100) + 50,
-      y: Math.random() * (GameConfig.MAP_HEIGHT - 100) + 50,
+      x: spawn.x,
+      y: spawn.y,
       angle: 0,
-      health: GameConfig.PLAYER_MAX_HEALTH,
-      maxHealth: GameConfig.PLAYER_MAX_HEALTH,
+      health: GameConfig.PLAYER_MAX_HEALTH * (selectedProfile && selectedProfile.buff.healthMultiplier || 1),
+      maxHealth: GameConfig.PLAYER_MAX_HEALTH * (selectedProfile && selectedProfile.buff.healthMultiplier || 1),
+      weapon: selectedWeapon,
+      profileId: selectedProfile ? selectedProfile.id : null,
+      image: selectedProfile ? selectedProfile.image : null,
+      damageMultiplier: selectedProfile && selectedProfile.buff.damageMultiplier || 1,
+      speed: GameConfig.PLAYER_SPEED * (selectedProfile && selectedProfile.buff.speedMultiplier || 1),
+      shieldUntil: 0,
+      doubleDamageUntil: 0,
+      frozenUntil: 0,
+      team: gameState.round.mode === 'teamDeathmatch' ? (Object.keys(gameState.players).length % 2 === 0 ? 'red' : 'blue') : null,
       alive: true,
       kills: 0,
       lastFired: 0
@@ -429,13 +771,7 @@ io.on('connection', (socket) => {
     // Send initial game state to new player
     socket.emit('init', {
       playerId: socket.id,
-      gameState: {
-        players: gameState.players,
-        bot: gameState.bot,
-        projectiles: gameState.projectiles,
-        powerups: gameState.powerups,
-        obstacles: gameState.obstacles
-      }
+      gameState: getPublicGameState()
     });
   });
 
@@ -445,8 +781,9 @@ io.on('connection', (socket) => {
     if (!player || !player.alive) return;
 
     // Update position
-    let newX = player.x + data.dx * GameConfig.PLAYER_SPEED;
-    let newY = player.y + data.dy * GameConfig.PLAYER_SPEED;
+    const movementMultiplier = player.frozenUntil > Date.now() ? 0.25 : 1;
+    let newX = player.x + data.dx * player.speed * movementMultiplier;
+    let newY = player.y + data.dy * player.speed * movementMultiplier;
 
     // Keep player within bounds
     newX = Math.max(GameConfig.PLAYER_SIZE / 2, Math.min(GameConfig.MAP_WIDTH - GameConfig.PLAYER_SIZE / 2, newX));
@@ -467,7 +804,8 @@ io.on('connection', (socket) => {
     if (!player || !player.alive) return;
 
     const now = Date.now();
-    if (now - player.lastFired < GameConfig.FIRE_COOLDOWN) return;
+    const weapon = GameConfig.WEAPONS[player.weapon] || GameConfig.WEAPONS.dualPistols;
+    if (now - player.lastFired < weapon.cooldown) return;
 
     createProjectile(player.x, player.y, data.angle, socket.id);
     player.lastFired = now;

@@ -10,10 +10,14 @@ let socket;
 let myPlayerId = null;
 let myNickname = '';
 let players = {};
-let bot = null;
+let bots = [];
+let botPortraits = {};
 let projectiles = [];
 let powerups = [];
 let obstacles = [];
+let explosions = [];
+let activeMap = null;
+let round = null;
 
 // Camera
 let cameraX = 0;
@@ -33,26 +37,43 @@ let soundsLoaded = false;
 
 // Game started flag
 let gameStarted = false;
+let lastMoveSentAt = 0;
+let lastScoreboardUpdateAt = 0;
+const MOVE_SEND_INTERVAL = 1000 / 60;
 
 /**
  * Join the game with nickname
  */
 function joinGame() {
   const nicknameInput = document.getElementById('nicknameInput');
+  const weaponSelect = document.getElementById('weaponSelect');
+  const modeSelect = document.getElementById('modeSelect');
   myNickname = nicknameInput.value.trim() || 'Player';
   
-  // Hide modal
-  document.getElementById('nicknameModal').classList.add('hidden');
-  
   // Send nickname to server
-  if (socket && socket.connected) {
-    socket.emit('setNickname', myNickname);
-    gameStarted = true;
+  if (!socket || !socket.connected) {
+    updateStatus('Still connecting...', false);
+    return;
   }
+
+  socket.emit('setNickname', {
+    nickname: myNickname,
+    mode: modeSelect.value,
+    weapon: weaponSelect.value
+  });
 }
 
 // Make joinGame available globally
 window.joinGame = joinGame;
+
+function populateJoinOptions() {
+  const weaponSelect = document.getElementById('weaponSelect');
+  const modeSelect = document.getElementById('modeSelect');
+  for (const [id, weapon] of Object.entries(GameConfig.WEAPONS || {})) weaponSelect.add(new Option(weapon.name, id));
+  for (const [id, mode] of Object.entries(GameConfig.GAME_MODES || {})) modeSelect.add(new Option(mode, id));
+  if (weaponSelect.options.length) weaponSelect.selectedIndex = Math.floor(Math.random() * weaponSelect.options.length);
+  if (modeSelect.options.length) modeSelect.selectedIndex = Math.floor(Math.random() * modeSelect.options.length);
+}
 
 /**
  * p5.js preload - load sounds before setup
@@ -60,18 +81,35 @@ window.joinGame = joinGame;
 function preload() {
   // Create simple synthetic sounds using p5.sound
   // These will be generated in setup since we can't load external files
+  for (const profile of GameConfig.BOT_PROFILES || []) {
+    botPortraits[profile.id] = loadImage(
+      profile.image,
+      undefined,
+      () => {
+        if (profile.imageFallback) {
+          botPortraits[profile.id] = loadImage(profile.imageFallback);
+        }
+      }
+    );
+  }
+  if (GameConfig.BOSS && GameConfig.BOSS.image) {
+    botPortraits.boss = loadImage(GameConfig.BOSS.image, undefined, () => {
+      botPortraits.boss = null;
+    });
+  }
 }
 
 /**
  * p5.js setup - runs once at start
  */
 function setup() {
+  populateJoinOptions();
   // Create canvas and attach to container
   let canvas = createCanvas(GameConfig.MAP_WIDTH, GameConfig.MAP_HEIGHT);
   canvas.parent('sketch-holder');
   
-  // Set canvas to viewport size for better viewing
-  resizeCanvas(min(windowWidth - 40, 1600), min(windowHeight - 300, 900));
+  // Keep the playfield aligned with the viewport instead of reserving space for side UI.
+  resizeCanvas(windowWidth, windowHeight);
   
   // Initialize synthetic sounds
   try {
@@ -109,27 +147,61 @@ function setup() {
     console.log('Disconnected from server');
     updateStatus('Disconnected', false);
     gameStarted = false;
+    document.getElementById('nicknameModal').classList.remove('hidden');
+  });
+
+  socket.on('joinRejected', (message) => {
+    gameStarted = false;
+    document.getElementById('nicknameModal').classList.remove('hidden');
+    updateStatus(message || 'Unable to join', false);
+  });
+
+  socket.on('roundStarted', (data) => {
+    round = data.round;
+    updateStatus(`Round ${round.number} started`, true);
+  });
+
+  socket.on('mapUnavailable', (mapName) => {
+    gameStarted = false;
+    document.getElementById('nicknameModal').classList.remove('hidden');
+    updateStatus(`${mapName} is currently in use`, false);
   });
   
   // Receive initial game state
   socket.on('init', (data) => {
+    document.getElementById('nicknameModal').classList.add('hidden');
+    gameStarted = true;
     myPlayerId = data.playerId;
     players = data.gameState.players;
-    bot = data.gameState.bot;
+    bots = data.gameState.bots || [];
     projectiles = data.gameState.projectiles;
     powerups = data.gameState.powerups;
     obstacles = data.gameState.obstacles;
+    explosions = data.gameState.explosions || [];
+    activeMap = data.gameState.map;
+    round = data.gameState.round;
   });
   
   // Receive game state updates
   socket.on('gameState', (data) => {
     players = data.players;
-    bot = data.bot;
+    bots = data.bots || [];
     projectiles = data.projectiles;
     powerups = data.powerups;
     obstacles = data.obstacles;
-    updateScoreboard();
+    explosions = data.explosions || [];
+    activeMap = data.map;
+    round = data.round;
+    const now = performance.now();
+    if (now - lastScoreboardUpdateAt >= 500) {
+      updateScoreboard();
+      lastScoreboardUpdateAt = now;
+    }
   });
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
 }
 
 /**
@@ -162,10 +234,12 @@ function draw() {
   translate(-cameraX, -cameraY);
   
   // Background
-  background(34, 47, 62);
+  background(activeMap && activeMap.lava ? '#4b1f1f' : '#222f3e');
   
   // Draw grid
   drawGrid();
+
+  drawKoth();
   
   // Draw obstacles
   drawObstacles();
@@ -175,10 +249,11 @@ function draw() {
   
   // Draw projectiles
   drawProjectiles();
+  drawExplosions();
   
-  // Draw bot
-  if (bot) {
-    drawCharacter(bot, GameConfig.COLORS.BOT, 'BOT');
+  // Draw bots
+  for (const bot of bots) {
+    drawCharacter(bot, GameConfig.COLORS.BOT, bot.name || 'BOT');
   }
   
   // Draw players
@@ -195,6 +270,7 @@ function draw() {
   
   // Draw UI elements (not affected by camera)
   drawUI();
+  drawDarkness();
 }
 
 /**
@@ -240,7 +316,7 @@ function drawObstacles() {
     rect(obstacle.x + 5, obstacle.y + 5, obstacle.width, obstacle.height, 5);
     
     // Main obstacle
-    fill(GameConfig.COLORS.OBSTACLE_FILL);
+    fill(obstacle.health < 100 ? '#855c3b' : GameConfig.COLORS.OBSTACLE_FILL);
     stroke(GameConfig.COLORS.OBSTACLE_STROKE);
     strokeWeight(3);
     rect(obstacle.x, obstacle.y, obstacle.width, obstacle.height, 5);
@@ -258,17 +334,38 @@ function drawObstacles() {
   }
 }
 
+function drawExplosions() {
+  for (const explosion of explosions) {
+    const age = Math.max(0, performance.now() - explosion.createdAt);
+    const alpha = Math.max(0, 180 - age / 3);
+    noStroke();
+    fill(255, 120, 20, alpha);
+    ellipse(explosion.x, explosion.y, explosion.radius * 1.5, explosion.radius * 1.5);
+  }
+}
+
+function drawKoth() {
+  if (!round || round.mode !== 'kingOfTheHill' || !round.koth) return;
+  noFill();
+  stroke(241, 196, 15, 180);
+  strokeWeight(5);
+  ellipse(round.koth.x, round.koth.y, round.koth.radius * 2, round.koth.radius * 2);
+}
+
 /**
  * Draw a character (player or bot)
  */
 function drawCharacter(character, color, label) {
+  const isBot = character.isBot || (character.id && (character.id.startsWith('bot-') || character.id.startsWith('boss-')));
+  const characterSize = isBot ? (character.size || GameConfig.BOT_SIZE) : GameConfig.PLAYER_SIZE;
+
   if (!character.alive) {
     // Draw death animation
     push();
     translate(character.x, character.y);
     fill(255, 0, 0, 100);
     noStroke();
-    ellipse(0, 0, GameConfig.PLAYER_SIZE * 1.5, GameConfig.PLAYER_SIZE * 1.5);
+    ellipse(0, 0, characterSize * 1.5, characterSize * 1.5);
     fill(255);
     textAlign(CENTER, CENTER);
     textSize(12);
@@ -280,11 +377,20 @@ function drawCharacter(character, color, label) {
   push();
   translate(character.x, character.y);
   
-  // Draw body
-  fill(color);
-  stroke(255);
-  strokeWeight(2);
-  ellipse(0, 0, GameConfig.PLAYER_SIZE, GameConfig.PLAYER_SIZE);
+  const portrait = character.profileId ? botPortraits[character.profileId] : null;
+  if (portrait && portrait.width > 0) {
+    imageMode(CENTER);
+    image(portrait, 0, 0, characterSize, characterSize);
+    noFill();
+    stroke(255);
+    strokeWeight(2);
+    ellipse(0, 0, characterSize, characterSize);
+  } else {
+    fill(color);
+    stroke(255);
+    strokeWeight(2);
+    ellipse(0, 0, characterSize, characterSize);
+  }
   
   // Draw direction indicator (gun)
   rotate(character.angle);
@@ -302,7 +408,7 @@ function drawCharacter(character, color, label) {
   noStroke();
   textAlign(CENTER, CENTER);
   textSize(10);
-  text(label, character.x, character.y - GameConfig.PLAYER_SIZE / 2 - 25);
+  text(label, character.x, character.y - characterSize / 2 - 25);
   pop();
 }
 
@@ -310,10 +416,12 @@ function drawCharacter(character, color, label) {
  * Draw health bar above character
  */
 function drawHealthBar(character) {
+  const isBot = character.isBot || (character.id && (character.id.startsWith('bot-') || character.id.startsWith('boss-')));
+  const characterSize = isBot ? (character.size || GameConfig.BOT_SIZE) : GameConfig.PLAYER_SIZE;
   const barWidth = 40;
   const barHeight = 6;
   const barX = character.x - barWidth / 2;
-  const barY = character.y - GameConfig.PLAYER_SIZE / 2 - 15;
+  const barY = character.y - characterSize / 2 - 15;
   
   // Background
   fill(GameConfig.COLORS.HEALTH_BAR_BG);
@@ -362,19 +470,39 @@ function drawPowerups() {
     ellipse(0, 0, pulseSize + 10, pulseSize + 10);
     
     // Main power-up
-    fill(GameConfig.COLORS.POWERUP_HEALTH);
+    const powerupColor = powerup.type === 'shield' ? '#3498DB' : powerup.type === 'doubleDamage' ? '#F1C40F' : GameConfig.COLORS.POWERUP_HEALTH;
+    fill(powerupColor);
     stroke(255);
     strokeWeight(2);
     ellipse(0, 0, pulseSize, pulseSize);
     
-    // Plus symbol for health
+    // Symbol for the selected power-up
     stroke(255);
     strokeWeight(3);
-    line(-5, 0, 5, 0);
-    line(0, -5, 0, 5);
+    if (powerup.type === 'shield') ellipse(0, 0, 8, 8);
+    else if (powerup.type === 'doubleDamage') line(-5, 5, 5, -5);
+    else {
+      line(-5, 0, 5, 0);
+      line(0, -5, 0, 5);
+    }
     
     pop();
   }
+}
+
+function drawDarkness() {
+  if (!activeMap || !activeMap.darkness) return;
+  const player = players[myPlayerId];
+  if (!player || !player.alive) return;
+  push();
+  resetMatrix();
+  noStroke();
+  fill(0, 0, 0, 255);
+  rect(0, 0, width, height);
+  erase(255, 255);
+  ellipse(player.x - cameraX, player.y - cameraY, GameConfig.DARKNESS_RADIUS * 2, GameConfig.DARKNESS_RADIUS * 2);
+  noErase();
+  pop();
 }
 
 /**
@@ -445,8 +573,9 @@ function drawMinimap() {
     );
   }
   
-  // Draw bot
-  if (bot && bot.alive) {
+  // Draw bots
+  for (const bot of bots) {
+    if (!bot.alive) continue;
     fill(GameConfig.COLORS.BOT);
     ellipse(
       minimapX + bot.x * scaleX,
@@ -506,9 +635,11 @@ function handleInput() {
   const angle = Math.atan2(worldMouseY - player.y, worldMouseX - player.x);
   
   // Send movement to server
-  if (dx !== 0 || dy !== 0 || angle !== mouseAngle) {
+  const now = performance.now();
+  if ((dx !== 0 || dy !== 0 || angle !== mouseAngle) && now - lastMoveSentAt >= MOVE_SEND_INTERVAL) {
     socket.emit('playerMove', { dx, dy, angle });
     mouseAngle = angle;
+    lastMoveSentAt = now;
   }
 }
 
